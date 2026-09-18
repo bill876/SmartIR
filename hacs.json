@@ -2,8 +2,7 @@
   "name": "SmartIR",
   "homeassistant": "2024.5.0",
   "persistent_directory": "custom_codes",
-  "zip_release": true,
-  "hide_default_branch": true,
-  "render_readme": true,
-  "filename": "smartir.zip"
+  "zip_release": false,
+  "hide_default_branch": false,
+  "render_readme": true
 }
