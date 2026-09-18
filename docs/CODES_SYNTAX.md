@@ -192,6 +192,56 @@ These are command to set controlled device into desired work state. Due to the n
                   },
   ```
 
+### Climate commands encoder
+
+Recording an IR command for every combination of modes and temperatures produces very large files. If the IR protocol of your AC unit is known (reverse engineered), you can instead declare a Python function which generates the command from the requested state. Replace the `commands` attribute with the `commandsEncoder` attribute (they can't be combined):
+
+```yaml:
+    "commandsEncoder": "9911"
+```
+
+| json attribute    | mandatory |   type   | description                                                                                                                                                                                                                                                                                                                                  |
+| ----------------- | :-------: | :------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `commandsEncoder` |   `no`    | `string` | Name of the Python module (without the `.py` suffix; it must be a valid Python identifier or decimal device code) which encodes the commands. The file `<commandsEncoder>.py` is searched for in the same directories as the JSON device files, `custom_codes/climate/` first and then `codes/climate/`. Mutually exclusive with `commands`. Only supported for climate devices. |
+
+The encoder module must define an `encode` function with the following signature:
+
+```python
+def encode(state, hvac_mode, preset_mode, fan_mode, swing_mode, temperature):
+    ...
+```
+
+- `state` is `"on"` or `"off"`. When `"off"`, the encoder must return the command which switches the device off; `hvac_mode` is then the operation mode the device was working in.
+- `hvac_mode`, `preset_mode`, `fan_mode` and `swing_mode` are values from the corresponding lists declared in the JSON file. The mode arguments are `None` when the corresponding list is not declared.
+- `temperature` is the target temperature already converted into the device `temperatureUnit`, rounded to the device `precision` and clamped into the `minTemperature`-`maxTemperature` range. It is an `int` for whole degree precision, otherwise `float`.
+- The function returns a single command string, or a list of command strings which are sent one after another with the configured `delay`. The commands must be in the `commandsEncoding` declared in the JSON file for the `supportedController`.
+- The function shall raise an exception (e.g. `ValueError`) for combinations the device doesn't support. The error is logged and the entity state is left unchanged.
+
+The encoder is validated when the device is set up: `encode` is called for every combination of the declared modes and every supported temperature (and for the `off` state of every operation mode). If any call fails, the device is not created and the error is logged. The same check is done by `test_device_data.py` in the repository CI.
+
+Helpers are available for building Broadlink commands from raw byte frames:
+
+```python
+from custom_components.smartir.smartir_helpers import bytes_to_pulses, pulses_to_broadlink
+
+pulses = bytes_to_pulses(
+    frame,                # bytes of the IR frame
+    header_mark=4400,     # all timings in microseconds
+    header_space=4400,
+    bit_mark=540,
+    one_space=1600,
+    zero_space=540,
+    footer_mark=540,      # optional stop mark
+    footer_space=5100,    # optional inter-frame gap
+    lsb_first=True,       # bit order within each byte, default MSB first
+)
+command = pulses_to_broadlink(pulses * 2)  # repeat frame twice, return Base64 string
+```
+
+See [`codes/climate/9911.py`](../codes/climate/9911.py) with [`codes/climate/9911.json`](../codes/climate/9911.json) for a complete example.
+
+**Note:** the encoder is regular Python code executed inside Home Assistant with full privileges. Only use encoder files from sources you trust.
+
 ## Light Speficic
 
 ### Light declaration part

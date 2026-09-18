@@ -4,6 +4,14 @@ import json
 import sys
 
 from custom_components.smartir.device_data import DeviceData
+from custom_components.smartir.encoder import (
+    load_encoder_module,
+    check_encoder_climate,
+)
+
+CHECK_ENCODER = {
+    "climate": check_encoder_climate,
+}
 
 CHECK_DATA = {
     "climate": {
@@ -29,6 +37,20 @@ async def test_json(file_path, docs):
             device_class,
             CHECK_DATA[device_class],
         ):
+            if encoder_name := device_data.get("commandsEncoder"):
+                encoder_path = p.with_name(encoder_name + ".py")
+                if not encoder_path.is_file():
+                    print(f"{file_name}: encoder file '{encoder_path}' doesn't exist.")
+                    return False
+                encoder = load_encoder_module(str(encoder_path))
+                if encoder is None:
+                    print(f"{file_name}: encoder file '{encoder_path}' failed to load.")
+                    return False
+                if not CHECK_ENCODER[device_class](
+                    encoder_path.name, encoder, device_data
+                ):
+                    print(f"{file_name}: encoder '{encoder_path}' check failed.")
+                    return False
             docs[device_class].append(
                 {
                     "file": file_name,
