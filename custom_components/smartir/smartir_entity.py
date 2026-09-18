@@ -11,6 +11,7 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .device_data import DeviceData
+from .encoder import load_encoder_module
 from .controller import get_controller, get_controller_schema
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +42,13 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
+def device_files_dir(codes_dir, device_class):
+    """Return the absolute path of the `codes` or `custom_codes` directory for a device class."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), codes_dir, device_class
+    )
+
+
 @staticmethod
 async def load_device_data_file(config, device_class, check_data, hass):
     device_code = config.get(CONF_DEVICE_CODE)
@@ -48,10 +56,7 @@ async def load_device_data_file(config, device_class, check_data, hass):
     """Load device JSON file."""
     device_json_file_name = str(device_code) + ".json"
 
-    device_files_subdir = os.path.join("custom_codes", device_class)
-    device_files_absdir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), device_files_subdir
-    )
+    device_files_absdir = device_files_dir("custom_codes", device_class)
     if os.path.isdir(device_files_absdir):
         device_json_file_path = os.path.join(device_files_absdir, device_json_file_name)
         if os.path.exists(device_json_file_path):
@@ -75,10 +80,7 @@ async def load_device_data_file(config, device_class, check_data, hass):
     else:
         os.makedirs(device_files_absdir)
 
-    device_files_subdir = os.path.join("codes", device_class)
-    device_files_absdir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), device_files_subdir
-    )
+    device_files_absdir = device_files_dir("codes", device_class)
     if os.path.isdir(device_files_absdir):
         device_json_file_path = os.path.join(device_files_absdir, device_json_file_name)
         if os.path.exists(device_json_file_path):
@@ -108,6 +110,45 @@ async def load_device_data_file(config, device_class, check_data, hass):
             "Devices JSON files directory '%s' doesn't exists!", device_files_absdir
         )
 
+    return None
+
+
+async def load_device_encoder(device_data, device_class, check_encoder, hass):
+    """Load the commands encoder Python module referenced by the device data.
+
+    The encoder file `<commandsEncoder>.py` is looked up in the same directories
+    and with the same precedence as device JSON files: `custom_codes/<device_class>`
+    first, then `codes/<device_class>`. Returns the module or None.
+    """
+    encoder_file_name = device_data["commandsEncoder"] + ".py"
+
+    for codes_dir in ["custom_codes", "codes"]:
+        encoder_file_path = os.path.join(
+            device_files_dir(codes_dir, device_class), encoder_file_name
+        )
+        if os.path.exists(encoder_file_path):
+            _LOGGER.debug(
+                "Loading %s device encoder file '%s'.",
+                device_class,
+                encoder_file_path,
+            )
+
+            def load_and_check():
+                encoder = load_encoder_module(encoder_file_path)
+                if encoder is not None and check_encoder(
+                    encoder_file_name, encoder, device_data
+                ):
+                    return encoder
+                return None
+
+            return await hass.async_add_executor_job(load_and_check)
+
+    _LOGGER.error(
+        "Device encoder file '%s' doesn't exists in '%s' or '%s'!",
+        encoder_file_name,
+        device_files_dir("custom_codes", device_class),
+        device_files_dir("codes", device_class),
+    )
     return None
 
 
@@ -141,7 +182,7 @@ class SmartIR:
         self._supported_models = device_data["supportedModels"]
         self._supported_controller = device_data["supportedController"]
         self._commands_encoding = device_data["commandsEncoding"]
-        self._commands = device_data["commands"]
+        self._commands = device_data.get("commands")
 
         # Init exclusive lock for sending IR commands
         self._temp_lock = asyncio.Lock()

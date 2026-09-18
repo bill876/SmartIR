@@ -3,9 +3,9 @@ from base64 import b64encode
 import ipaddress
 import binascii
 import requests
-import struct
 import json
 
+from .smartir_helpers import pronto2lirc, lirc2broadlink
 from .controller_const import (
     BROADLINK_CONTROLLER,
     XIAOMI_CONTROLLER,
@@ -175,8 +175,8 @@ class BroadlinkController(AbstractController):
                 try:
                     _command = _command.replace(" ", "")
                     _command = bytearray.fromhex(_command)
-                    _command = Helper.pronto2lirc(_command)
-                    _command = Helper.lirc2broadlink(_command)
+                    _command = pronto2lirc(_command)
+                    _command = lirc2broadlink(_command)
                     _command = b64encode(_command).decode("utf-8")
                 except:
                     raise Exception(
@@ -326,46 +326,3 @@ class UFOR11Controller(MQTTController):
         }
 
         await self.hass.services.async_call("mqtt", "publish", service_data)
-
-
-class Helper:
-    """Static shared functions."""
-
-    @staticmethod
-    def pronto2lirc(pronto):
-        codes = [
-            int(binascii.hexlify(pronto[i : i + 2]), 16)
-            for i in range(0, len(pronto), 2)
-        ]
-
-        if codes[0]:
-            raise ValueError("Pronto code should start with 0000")
-        if len(codes) != 4 + 2 * (codes[2] + codes[3]):
-            raise ValueError("Number of pulse widths does not match the preamble")
-
-        frequency = 1 / (codes[1] * 0.241246)
-        return [int(round(code / frequency)) for code in codes[4:]]
-
-    @staticmethod
-    def lirc2broadlink(pulses):
-        array = bytearray()
-
-        for pulse in pulses:
-            pulse = int(pulse * 269 / 8192)
-
-            if pulse < 256:
-                array += bytearray(struct.pack(">B", pulse))
-            else:
-                array += bytearray([0x00])
-                array += bytearray(struct.pack(">H", pulse))
-
-        packet = bytearray([0x26, 0x00])
-        packet += bytearray(struct.pack("<H", len(array)))
-        packet += array
-        packet += bytearray([0x0D, 0x05])
-
-        # Add 0s to make ultimate packet size a multiple of 16 for 128-bit AES encryption.
-        remainder = (len(packet) + 4) % 16
-        if remainder:
-            packet += bytearray(16 - remainder)
-        return packet

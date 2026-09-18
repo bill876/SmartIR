@@ -31,7 +31,13 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.unit_conversion import TemperatureConverter
 from .smartir_helpers import closest_match_value
-from .smartir_entity import load_device_data_file, SmartIR, PLATFORM_SCHEMA
+from .encoder import encode_command, check_encoder_climate
+from .smartir_entity import (
+    load_device_data_file,
+    load_device_encoder,
+    SmartIR,
+    PLATFORM_SCHEMA,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,15 +75,30 @@ async def async_setup_platform(
         _LOGGER.error("SmartIR climate device data init failed!")
         return
 
-    async_add_entities([SmartIRClimate(hass, config, device_data)])
+    encoder = None
+    if device_data.get("commandsEncoder"):
+        encoder = await load_device_encoder(
+            device_data, "climate", check_encoder_climate, hass
+        )
+        if encoder is None:
+            _LOGGER.error("SmartIR climate device commands encoder init failed!")
+            return
+
+    async_add_entities([SmartIRClimate(hass, config, device_data, encoder)])
 
 
 class SmartIRClimate(SmartIR, ClimateEntity, RestoreEntity):
     _enable_turn_on_off_backwards_compatibility = False
 
-    def __init__(self, hass: HomeAssistant, config: ConfigType, device_data):
+    def __init__(
+        self, hass: HomeAssistant, config: ConfigType, device_data, encoder=None
+    ):
         # Initialize SmartIR device
         SmartIR.__init__(self, hass, config, device_data)
+
+        # commands encoder module (alternative to the 'commands' dict)
+        self._encoder = encoder
+        self._commands_encoder = device_data.get("commandsEncoder")
 
         self._temperature_sensor = config.get(CONF_TEMPERATURE_SENSOR)
         self._humidity_sensor = config.get(CONF_HUMIDITY_SENSOR)
@@ -141,6 +162,8 @@ class SmartIRClimate(SmartIR, ClimateEntity, RestoreEntity):
                 self._temp_step = self._data_temp_step
 
         # min & max temperatures
+        self._data_min_temperature = device_data["minTemperature"]
+        self._data_max_temperature = device_data["maxTemperature"]
         self._min_temperature = convert_temp(
             device_data["minTemperature"],
             self._data_temperature_unit,
@@ -361,6 +384,7 @@ class SmartIRClimate(SmartIR, ClimateEntity, RestoreEntity):
             "supported_models": self._supported_models,
             "supported_controller": self._supported_controller,
             "commands_encoding": self._commands_encoding,
+            "commands_encoder": self._commands_encoder,
         }
 
     async def async_set_hvac_mode(self, hvac_mode):
@@ -485,207 +509,20 @@ class SmartIRClimate(SmartIR, ClimateEntity, RestoreEntity):
                 self._async_power_sensor_check_schedule(state)
 
             try:
-                if state == STATE_OFF:
-                    off_mode = "off_" + self._hvac_mode
-                    if off_mode in self._commands.keys() and isinstance(
-                        self._commands[off_mode], str
-                    ):
-                        _LOGGER.debug("Found '%s' operation mode command.", off_mode)
-                        await self._controller.send(self._commands[off_mode])
-                        await asyncio.sleep(self._delay)
-                    elif "off" in self._commands.keys() and isinstance(
-                        self._commands["off"], str
-                    ):
-                        if (
-                            "on" in self._commands.keys()
-                            and isinstance(self._commands["on"], str)
-                            and self._commands["on"] == self._commands["off"]
-                            and self._state == STATE_OFF
-                        ):
-                            # prevent to resend 'off' command if same as 'on' and device is already off
-                            _LOGGER.debug(
-                                "As 'on' and 'off' commands are identical and device is already in requested '%s' state, skipping sending '%s' command",
-                                self._state,
-                                "off",
-                            )
-                        else:
-                            _LOGGER.debug("Found 'off' operation mode command.")
-                            await self._controller.send(self._commands["off"])
-                            await asyncio.sleep(self._delay)
-                    else:
-                        _LOGGER.error(
-                            "Missing device IR code for 'off' or '%s' operation mode.",
-                            off_mode,
-                        )
-                        return
+                if self._encoder is not None:
+                    found = self._encode_commands(
+                        state, hvac_mode, preset_mode, fan_mode, swing_mode, temperature
+                    )
                 else:
-                    if "on" in self._commands.keys() and isinstance(
-                        self._commands["on"], str
-                    ):
-                        if (
-                            "off" in self._commands.keys()
-                            and isinstance(self._commands["off"], str)
-                            and self._commands["off"] == self._commands["on"]
-                            and self._state == STATE_ON
-                        ):
-                            # prevent to resend 'on' command if same as 'off' and device is already on
-                            _LOGGER.debug(
-                                "As 'on' and 'off' commands are identical and device is already in requested '%s' state, skipping sending '%s' command",
-                                self._state,
-                                "on",
-                            )
-                        else:
-                            # if on code is not present, the on bit can be still set later in the all operation/fan codes"""
-                            _LOGGER.debug("Found 'on' operation mode command.")
-                            await self._controller.send(self._commands["on"])
-                            await asyncio.sleep(self._delay)
+                    found = self._find_commands(
+                        state, hvac_mode, preset_mode, fan_mode, swing_mode, temperature
+                    )
+                if found is None:
+                    return
+                commands, preset_mode, fan_mode, swing_mode, temperature = found
 
-                    commands = self._commands
-                    if hvac_mode in commands.keys():
-                        commands = commands[hvac_mode]
-                        _LOGGER.debug(
-                            "Found '%s' operation mode command.",
-                            hvac_mode,
-                        )
-                    else:
-                        _LOGGER.error(
-                            "Missing device IR code for '%s' operation mode.", hvac_mode
-                        )
-                        return
-
-                    if self._preset_modes:
-                        if isinstance(commands, dict):
-                            for key in ["-", preset_mode] + self._preset_modes:
-                                if key in commands.keys():
-                                    preset_mode = key
-                                    commands = commands[key]
-                                    _LOGGER.debug(
-                                        "Found '%s' preset mode command.",
-                                        preset_mode,
-                                    )
-                                    break
-                            else:
-                                _LOGGER.error(
-                                    "Missing device IR codes for selected '%s' preset mode.",
-                                    preset_mode,
-                                )
-                                return
-                        else:
-                            _LOGGER.error(
-                                "No device IR codes for preset modes are defined.",
-                            )
-                            return
-
-                    if self._fan_modes:
-                        if isinstance(commands, dict):
-                            for key in ["-", fan_mode] + self._fan_modes:
-                                if key in commands.keys():
-                                    fan_mode = key
-                                    commands = commands[key]
-                                    _LOGGER.debug(
-                                        "Found '%s' fan mode command.",
-                                        fan_mode,
-                                    )
-                                    break
-                            else:
-                                _LOGGER.error(
-                                    "Missing device IR codes for selected '%s' fan mode.",
-                                    fan_mode,
-                                )
-                                return
-                        else:
-                            _LOGGER.error(
-                                "No device IR codes for fan modes are defined.",
-                            )
-                            return
-
-                    if self._swing_modes:
-                        if isinstance(commands, dict):
-                            for key in ["-", swing_mode] + self._swing_modes:
-                                if key in commands.keys():
-                                    swing_mode = key
-                                    commands = commands[key]
-                                    _LOGGER.debug(
-                                        "Found '%s' swing mode command.",
-                                        swing_mode,
-                                    )
-                                    break
-                            else:
-                                _LOGGER.error(
-                                    "Missing device IR codes for selected '%s' swing mode.",
-                                    swing_mode,
-                                )
-                                return
-                        else:
-                            _LOGGER.error(
-                                "No device IR codes for swing modes are defined.",
-                            )
-                            return
-
-                    if isinstance(commands, dict):
-                        target_temperature = convert_temp(
-                            temperature,
-                            self._ha_temperature_unit,
-                            self._data_temperature_unit,
-                            None,
-                        )
-                        _LOGGER.debug(
-                            "Input HA temperature '%s%s' converted into device temperature '%s%s'.",
-                            temperature,
-                            self._ha_temperature_unit,
-                            target_temperature,
-                            self._data_temperature_unit,
-                        )
-
-                        if "-" in commands.keys():
-                            temperature = "-"
-                            commands = commands["-"]
-                        elif (
-                            temp := closest_match_value(
-                                target_temperature, commands.keys()
-                            )
-                        ) and temp is not None:
-                            # convert selected device temperature back to HA units
-                            temp_ha = convert_temp(
-                                temp,
-                                self._data_temperature_unit,
-                                self._ha_temperature_unit,
-                                self._temp_step,
-                            )
-                            _LOGGER.debug(
-                                "Input HA temperature '%s%s' closest found device temperature command '%s%s' converts back into HA '%s%s' temperature.",
-                                temperature,
-                                self._ha_temperature_unit,
-                                temp,
-                                self._data_temperature_unit,
-                                temp_ha,
-                                self._ha_temperature_unit,
-                            )
-                            temperature = temp_ha
-                            commands = commands[str(temp)]
-                        else:
-                            _LOGGER.error(
-                                "Missing device IR codes for selected '%s' temperature.",
-                                target_temperature,
-                            )
-                            return
-                        _LOGGER.debug(
-                            "Found '%s', temperature command.",
-                            temperature,
-                        )
-                    else:
-                        _LOGGER.error(
-                            "No device IR codes for temperatures are defined.",
-                        )
-                        return
-
-                    if not isinstance(commands, str):
-                        _LOGGER.error(
-                            "No device IR code found.",
-                        )
-                        return
-
-                    await self._controller.send(commands)
+                for command in commands:
+                    await self._controller.send(command)
                     await asyncio.sleep(self._delay)
 
                 self._on_by_remote = False
@@ -706,6 +543,283 @@ class SmartIRClimate(SmartIR, ClimateEntity, RestoreEntity):
                 _LOGGER.exception(
                     "Exception raised in the in the _send_command '%s'", e
                 )
+
+    def _encode_commands(
+        self, state, hvac_mode, preset_mode, fan_mode, swing_mode, temperature
+    ):
+        """Generate the commands with the device commands encoder.
+
+        Returns a tuple (commands, preset_mode, fan_mode, swing_mode, temperature)
+        or None if the encoder rejected the requested state.
+        """
+        target_temperature = convert_temp(
+            temperature,
+            self._ha_temperature_unit,
+            self._data_temperature_unit,
+            self._data_temp_step,
+        )
+        if target_temperature is None:
+            return None
+        target_temperature = min(
+            max(target_temperature, self._data_min_temperature),
+            self._data_max_temperature,
+        )
+        _LOGGER.debug(
+            "Input HA temperature '%s%s' converted into device temperature '%s%s'.",
+            temperature,
+            self._ha_temperature_unit,
+            target_temperature,
+            self._data_temperature_unit,
+        )
+
+        try:
+            commands = encode_command(
+                self._encoder,
+                state=state,
+                hvac_mode=hvac_mode,
+                preset_mode=preset_mode if self._preset_modes else None,
+                fan_mode=fan_mode if self._fan_modes else None,
+                swing_mode=swing_mode if self._swing_modes else None,
+                temperature=target_temperature,
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Device commands encoder '%s' failed to encode state '%s', operation mode '%s', preset mode '%s', fan mode '%s', swing mode '%s', temperature '%s': '%s'.",
+                self._commands_encoder,
+                state,
+                hvac_mode,
+                preset_mode,
+                fan_mode,
+                swing_mode,
+                target_temperature,
+                e,
+            )
+            return None
+
+        # convert the device temperature back to HA units
+        temperature = convert_temp(
+            target_temperature,
+            self._data_temperature_unit,
+            self._ha_temperature_unit,
+            self._temp_step,
+        )
+        _LOGGER.debug(
+            "Encoded %d command(s) for state '%s', operation mode '%s', preset mode '%s', fan mode '%s', swing mode '%s', temperature '%s%s'.",
+            len(commands),
+            state,
+            hvac_mode,
+            preset_mode,
+            fan_mode,
+            swing_mode,
+            target_temperature,
+            self._data_temperature_unit,
+        )
+        return commands, preset_mode, fan_mode, swing_mode, temperature
+
+    def _find_commands(
+        self, state, hvac_mode, preset_mode, fan_mode, swing_mode, temperature
+    ):
+        """Look up the commands in the device 'commands' dict.
+
+        Returns a tuple (commands, preset_mode, fan_mode, swing_mode, temperature)
+        with the actually matched modes/temperature, or None if no command was found.
+        """
+        to_send = []
+
+        if state == STATE_OFF:
+            off_mode = "off_" + self._hvac_mode
+            if off_mode in self._commands.keys() and isinstance(
+                self._commands[off_mode], str
+            ):
+                _LOGGER.debug("Found '%s' operation mode command.", off_mode)
+                to_send.append(self._commands[off_mode])
+            elif "off" in self._commands.keys() and isinstance(
+                self._commands["off"], str
+            ):
+                if (
+                    "on" in self._commands.keys()
+                    and isinstance(self._commands["on"], str)
+                    and self._commands["on"] == self._commands["off"]
+                    and self._state == STATE_OFF
+                ):
+                    # prevent to resend 'off' command if same as 'on' and device is already off
+                    _LOGGER.debug(
+                        "As 'on' and 'off' commands are identical and device is already in requested '%s' state, skipping sending '%s' command",
+                        self._state,
+                        "off",
+                    )
+                else:
+                    _LOGGER.debug("Found 'off' operation mode command.")
+                    to_send.append(self._commands["off"])
+            else:
+                _LOGGER.error(
+                    "Missing device IR code for 'off' or '%s' operation mode.",
+                    off_mode,
+                )
+                return None
+            return to_send, preset_mode, fan_mode, swing_mode, temperature
+
+        if "on" in self._commands.keys() and isinstance(self._commands["on"], str):
+            if (
+                "off" in self._commands.keys()
+                and isinstance(self._commands["off"], str)
+                and self._commands["off"] == self._commands["on"]
+                and self._state == STATE_ON
+            ):
+                # prevent to resend 'on' command if same as 'off' and device is already on
+                _LOGGER.debug(
+                    "As 'on' and 'off' commands are identical and device is already in requested '%s' state, skipping sending '%s' command",
+                    self._state,
+                    "on",
+                )
+            else:
+                # if on code is not present, the on bit can be still set later in the all operation/fan codes"""
+                _LOGGER.debug("Found 'on' operation mode command.")
+                to_send.append(self._commands["on"])
+
+        commands = self._commands
+        if hvac_mode in commands.keys():
+            commands = commands[hvac_mode]
+            _LOGGER.debug(
+                "Found '%s' operation mode command.",
+                hvac_mode,
+            )
+        else:
+            _LOGGER.error("Missing device IR code for '%s' operation mode.", hvac_mode)
+            return None
+
+        if self._preset_modes:
+            if isinstance(commands, dict):
+                for key in ["-", preset_mode] + self._preset_modes:
+                    if key in commands.keys():
+                        preset_mode = key
+                        commands = commands[key]
+                        _LOGGER.debug(
+                            "Found '%s' preset mode command.",
+                            preset_mode,
+                        )
+                        break
+                else:
+                    _LOGGER.error(
+                        "Missing device IR codes for selected '%s' preset mode.",
+                        preset_mode,
+                    )
+                    return None
+            else:
+                _LOGGER.error(
+                    "No device IR codes for preset modes are defined.",
+                )
+                return None
+
+        if self._fan_modes:
+            if isinstance(commands, dict):
+                for key in ["-", fan_mode] + self._fan_modes:
+                    if key in commands.keys():
+                        fan_mode = key
+                        commands = commands[key]
+                        _LOGGER.debug(
+                            "Found '%s' fan mode command.",
+                            fan_mode,
+                        )
+                        break
+                else:
+                    _LOGGER.error(
+                        "Missing device IR codes for selected '%s' fan mode.",
+                        fan_mode,
+                    )
+                    return None
+            else:
+                _LOGGER.error(
+                    "No device IR codes for fan modes are defined.",
+                )
+                return None
+
+        if self._swing_modes:
+            if isinstance(commands, dict):
+                for key in ["-", swing_mode] + self._swing_modes:
+                    if key in commands.keys():
+                        swing_mode = key
+                        commands = commands[key]
+                        _LOGGER.debug(
+                            "Found '%s' swing mode command.",
+                            swing_mode,
+                        )
+                        break
+                else:
+                    _LOGGER.error(
+                        "Missing device IR codes for selected '%s' swing mode.",
+                        swing_mode,
+                    )
+                    return None
+            else:
+                _LOGGER.error(
+                    "No device IR codes for swing modes are defined.",
+                )
+                return None
+
+        if isinstance(commands, dict):
+            target_temperature = convert_temp(
+                temperature,
+                self._ha_temperature_unit,
+                self._data_temperature_unit,
+                None,
+            )
+            _LOGGER.debug(
+                "Input HA temperature '%s%s' converted into device temperature '%s%s'.",
+                temperature,
+                self._ha_temperature_unit,
+                target_temperature,
+                self._data_temperature_unit,
+            )
+
+            if "-" in commands.keys():
+                temperature = "-"
+                commands = commands["-"]
+            elif (
+                temp := closest_match_value(target_temperature, commands.keys())
+            ) and temp is not None:
+                # convert selected device temperature back to HA units
+                temp_ha = convert_temp(
+                    temp,
+                    self._data_temperature_unit,
+                    self._ha_temperature_unit,
+                    self._temp_step,
+                )
+                _LOGGER.debug(
+                    "Input HA temperature '%s%s' closest found device temperature command '%s%s' converts back into HA '%s%s' temperature.",
+                    temperature,
+                    self._ha_temperature_unit,
+                    temp,
+                    self._data_temperature_unit,
+                    temp_ha,
+                    self._ha_temperature_unit,
+                )
+                temperature = temp_ha
+                commands = commands[str(temp)]
+            else:
+                _LOGGER.error(
+                    "Missing device IR codes for selected '%s' temperature.",
+                    target_temperature,
+                )
+                return None
+            _LOGGER.debug(
+                "Found '%s', temperature command.",
+                temperature,
+            )
+        else:
+            _LOGGER.error(
+                "No device IR codes for temperatures are defined.",
+            )
+            return None
+
+        if not isinstance(commands, str):
+            _LOGGER.error(
+                "No device IR code found.",
+            )
+            return None
+
+        to_send.append(commands)
+        return to_send, preset_mode, fan_mode, swing_mode, temperature
 
     async def _async_temp_sensor_changed(
         self, event: Event[EventStateChangedData]
