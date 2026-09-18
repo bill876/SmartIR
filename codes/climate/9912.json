@@ -1,0 +1,13 @@
+{
+  "manufacturer": "Zanussi",
+  "supportedModels": ["1111"],
+  "supportedController": "ESPHome",
+  "commandsEncoding": "Raw",
+  "temperatureUnit": "C",
+  "minTemperature": 17,
+  "maxTemperature": 30,
+  "precision": 1,
+  "operationModes": ["cool", "heat", "heat_cool", "fan_only", "dry"],
+  "fanModes": ["auto", "low", "medium", "high"],
+  "commandsEncoder": "9912"
+}
