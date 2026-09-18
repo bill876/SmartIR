@@ -1,0 +1,14 @@
+{
+  "manufacturer": "Mesto",
+  "supportedModels": ["Cthulhu Room"],
+  "supportedController": "Broadlink",
+  "commandsEncoding": "Base64",
+  "temperatureUnit": "C",
+  "minTemperature": 18,
+  "maxTemperature": 26,
+  "precision": 1,
+  "operationModes": ["cool"],
+  "fanModes": ["auto", "low"],
+  "swingModes": ["off", "on"],
+  "commandsEncoder": "10121"
+}
