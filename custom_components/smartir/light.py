@@ -8,6 +8,7 @@ from homeassistant.components.light import (
     ATTR_COLOR_TEMP_KELVIN,
     ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
 from homeassistant.const import CONF_NAME, STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData
@@ -55,7 +56,7 @@ async def async_setup_platform(
     async_add_entities([SmartIRLight(hass, config, device_data)])
 
 
-class SmartIRLight(LightEntity, RestoreEntity):
+class SmartIRLight(SmartIR, LightEntity, RestoreEntity):
 
     def __init__(self, hass: HomeAssistant, config: ConfigType, device_data):
         # Initialize SmartIR device
@@ -103,6 +104,11 @@ class SmartIRLight(LightEntity, RestoreEntity):
                 self._brightness = last_state.attributes[ATTR_BRIGHTNESS]
             if ATTR_COLOR_TEMP_KELVIN in last_state.attributes:
                 self._colortemp = last_state.attributes[ATTR_COLOR_TEMP_KELVIN]
+
+    @property
+    def supported_features(self) -> LightEntityFeature:
+        """Return light feature flags rather than the shared integer flags."""
+        return LightEntityFeature(0)
 
     @property
     def color_mode(self):
